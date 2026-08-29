@@ -145,6 +145,48 @@ test("retains exclusions and acceptance criteria in result and report", async ()
   assert.match(markdown, /Desktop and mobile review/);
 });
 
+test("excludes clarification estimates from change-order totals", async () => {
+  const input = await fixture();
+  input.later_messages.push({
+    id: "msg-clarification-estimate",
+    scan_status: "clean",
+    body_excerpt: "For clarity, the existing brand review itself takes 100 hours.",
+    observations: [{
+      kind: "clarification",
+      baseline_item_id: "D1",
+      requested_text: "Record the existing brand review effort",
+      evidence_quote: "existing brand review itself takes 100 hours",
+      estimated_hours: 100,
+      estimate_source: "user_supplied",
+      confidence: "high",
+    }],
+  });
+  const result = analyzeScopeChanges(input);
+  assert.equal(result.totals.estimated_hours, 15);
+  assert.equal(result.totals.user_supplied_hours, null);
+  assert.equal(result.totals.preliminary_hours, 15);
+  assert.doesNotMatch(result.draft.body_text, /100 hours/);
+});
+
+test("requires currency whenever monetary inputs are present", async () => {
+  const fixed = await fixture();
+  fixed.project.currency = undefined;
+  fixed.project.hourly_rate = undefined;
+  assert.throws(() => validateInput(fixed), /monetary inputs require project.currency/);
+
+  const hourly = await fixture();
+  hourly.project.currency = undefined;
+  hourly.baseline.fixed_amount = undefined;
+  assert.throws(() => validateInput(hourly), /monetary inputs require project.currency/);
+});
+
+test("renders the affected baseline item for actionable changes", async () => {
+  const input = await fixture();
+  input.later_messages[1].observations[0].kind = "modification";
+  const markdown = renderMarkdown(analyzeScopeChanges(input));
+  assert.match(markdown, /Affected baseline item: D1/);
+});
+
 test("rejects non-clean message content", async () => {
   const input = await fixture();
   input.later_messages[0].scan_status = "flagged";

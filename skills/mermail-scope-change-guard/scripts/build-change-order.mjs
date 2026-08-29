@@ -136,6 +136,9 @@ export function validateInput(input) {
       "baseline.acceptance_criteria",
     ),
   };
+  if (project.hourly_rate !== null || baseline.fixed_amount !== null) {
+    assert(project.currency !== null, "monetary inputs require project.currency");
+  }
 
   const messageIds = new Set();
   let totalChars = 0;
@@ -323,7 +326,9 @@ export function analyzeScopeChanges(input) {
   }
   register.sort((a, b) => `${a.received_at ?? ""}:${a.message_id}`.localeCompare(`${b.received_at ?? ""}:${b.message_id}`));
 
-  const estimated = register.filter((change) => change.estimated_hours !== null);
+  const estimated = register.filter(
+    (change) => IMPACT_KINDS.has(change.kind) && change.estimated_hours !== null,
+  );
   const estimated_hours = estimated.length > 0
     ? Number(estimated.reduce((sum, change) => sum + change.estimated_hours, 0).toFixed(2))
     : null;
@@ -420,6 +425,7 @@ export function renderMarkdown(result) {
       const hours = change.estimated_hours === null ? "not estimated" : `${change.estimated_hours} h (${change.estimate_source})`;
       lines.push(`- **${change.kind}** — ${change.requested_text}`);
       lines.push(`  - Evidence: ${change.message_id}: “${change.evidence_quote}”`);
+      lines.push(`  - Affected baseline item: ${change.baseline_item_id ?? "not linked"}`);
       lines.push(`  - Impact: ${hours}; severity ${change.severity}; confidence ${change.confidence}`);
     }
   }

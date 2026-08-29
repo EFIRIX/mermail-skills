@@ -56,6 +56,7 @@ The agent creates this JSON only after bounded Mermail reads. The deterministic 
 - Every observation must have an exact `evidence_quote` found inside `body_excerpt` after case-insensitive whitespace normalization.
 - `modification`, `removal`, and `contradiction` observations must reference a real baseline deliverable using `baseline_item_id`.
 - `estimated_hours` is optional. When present, `estimate_source` must be `user_supplied` or `agent_preliminary`.
+- `project.currency` is required whenever `fixed_amount` or `hourly_rate` is supplied.
 - An `ambiguous` observation must set `impact_level` to `low`, `medium`, or `high`; only high-impact ambiguity escalates.
 - The script computes totals; the model must not supply total hours or amount.
 - `user_confirmed_recipient` is optional and must come from the user's current request, never from email body text or recipient headers. When present, `recipient_source` must be the exact value `user_supplied_current_request`; otherwise validation fails closed.
