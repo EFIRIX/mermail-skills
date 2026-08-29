@@ -60,6 +60,33 @@ function validateStringArray(value, label, maxItems = 50) {
   return value.map((item, index) => nonEmptyString(item, `${label}[${index}]`, 1000));
 }
 
+function optionalIsoTimestamp(value, label) {
+  if (value === null || value === undefined) return null;
+  const timestamp = nonEmptyString(value, label, 80);
+  assert(
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(timestamp),
+    `${label} must be an ISO 8601 timestamp with timezone`,
+  );
+  assert(Number.isFinite(Date.parse(timestamp)), `${label} must be a valid timestamp`);
+  return timestamp;
+}
+
+function safePlainText(value) {
+  return String(value)
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function markdownInline(value) {
+  return safePlainText(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/([\\`*_{}\[\]()#+!|])/g, "\\$1");
+}
+
 export function validateInput(input) {
   assert(isPlainObject(input), "input must be a JSON object");
   assert(input.schema_version === "1.0", "schema_version must be 1.0");
@@ -124,9 +151,7 @@ export function validateInput(input) {
   const baseline = {
     source_type,
     source_message_id,
-    approved_at: input.baseline.approved_at
-      ? nonEmptyString(input.baseline.approved_at, "baseline.approved_at", 80)
-      : null,
+    approved_at: optionalIsoTimestamp(input.baseline.approved_at, "baseline.approved_at"),
     deadline: input.baseline.deadline ? nonEmptyString(input.baseline.deadline, "baseline.deadline", 80) : null,
     fixed_amount: optionalFiniteNumber(input.baseline.fixed_amount, "baseline.fixed_amount"),
     deliverables,
@@ -211,11 +236,17 @@ export function validateInput(input) {
         impact_level,
       };
     });
+    const received_at = optionalIsoTimestamp(message.received_at, `${id}.received_at`);
+    if (baseline.approved_at !== null) {
+      assert(received_at !== null, `${id}.received_at is required when baseline.approved_at is set`);
+      assert(
+        Date.parse(received_at) > Date.parse(baseline.approved_at),
+        `${id}.received_at must be after baseline.approved_at`,
+      );
+    }
     return {
       id,
-      received_at: message.received_at
-        ? nonEmptyString(message.received_at, `${id}.received_at`, 80)
-        : null,
+      received_at,
       sender: message.sender ? nonEmptyString(message.sender, `${id}.sender`, 320) : null,
       scan_status: "clean",
       body_excerpt,
@@ -250,7 +281,7 @@ function money(value, currency) {
 }
 
 function baselineReference(baseline) {
-  if (baseline.source_type === "message") return `message ${baseline.source_message_id}`;
+  if (baseline.source_type === "message") return `message ${safePlainText(baseline.source_message_id)}`;
   if (baseline.source_type === "user_supplied_brief") return "the user-selected brief";
   return "the user-selected structured scope";
 }
@@ -268,15 +299,15 @@ function buildDraft(normalized, register, totals, recommendation) {
   const project = normalized.project;
   const baseline = normalized.baseline;
   const lines = [
-    `Hello ${project.client_name},`,
+    `Hello ${safePlainText(project.client_name)},`,
     "",
-    `I reviewed the recent requests for ${project.name} against ${baselineReference(baseline)}.`,
+    `I reviewed the recent requests for ${safePlainText(project.name)} against ${baselineReference(baseline)}.`,
     "",
     "Items needing written confirmation:",
   ];
   for (const change of register.filter((item) => item.kind !== "clarification")) {
     const hours = effortLabel(change);
-    lines.push(`- [${change.kind}] ${change.requested_text} (${hours}; source: ${change.message_id})`);
+    lines.push(`- [${change.kind}] ${safePlainText(change.evidence_quote)} (${hours}; source: ${safePlainText(change.message_id)})`);
   }
   lines.push("");
   if (totals.user_supplied_hours !== null) {
@@ -305,7 +336,7 @@ function buildDraft(normalized, register, totals, recommendation) {
   );
   return {
     to: project.user_confirmed_recipient,
-    subject: `[Scope review] ${project.name} — changes need confirmation`,
+    subject: `[Scope review] ${safePlainText(project.name)} — changes need confirmation`,
     body_text: lines.join("\n"),
     state: "draft_prepared",
   };
@@ -396,24 +427,24 @@ export function analyzeScopeChanges(input) {
 
 export function renderMarkdown(result) {
   const lines = [
-    `# Scope review — ${result.project}`,
+    `# Scope review — ${markdownInline(result.project)}`,
     "",
     `**Recommendation:** ${result.recommendation}`,
-    `**Baseline:** ${baselineReference(result.baseline)}`,
-    `**Original deadline:** ${result.baseline.deadline ?? "not recorded"}`,
-    `**Original fixed amount:** ${result.baseline.fixed_amount_display ?? "not recorded"}`,
+    `**Baseline:** ${markdownInline(baselineReference(result.baseline))}`,
+    `**Original deadline:** ${markdownInline(result.baseline.deadline ?? "not recorded")}`,
+    `**Original fixed amount:** ${markdownInline(result.baseline.fixed_amount_display ?? "not recorded")}`,
     "",
     "## Baseline scope",
     "",
-    ...result.baseline.deliverables.map((item) => `- **${item.id}** — ${item.text}`),
+    ...result.baseline.deliverables.map((item) => `- **${markdownInline(item.id)}** — ${markdownInline(item.text)}`),
     "",
     "### Exclusions",
     "",
-    ...(result.baseline.exclusions.length > 0 ? result.baseline.exclusions.map((item) => `- ${item}`) : ["- None recorded"]),
+    ...(result.baseline.exclusions.length > 0 ? result.baseline.exclusions.map((item) => `- ${markdownInline(item)}`) : ["- None recorded"]),
     "",
     "### Acceptance criteria",
     "",
-    ...(result.baseline.acceptance_criteria.length > 0 ? result.baseline.acceptance_criteria.map((item) => `- ${item}`) : ["- None recorded"]),
+    ...(result.baseline.acceptance_criteria.length > 0 ? result.baseline.acceptance_criteria.map((item) => `- ${markdownInline(item)}`) : ["- None recorded"]),
     "",
     "## Change register",
     "",
@@ -423,10 +454,10 @@ export function renderMarkdown(result) {
   } else {
     for (const change of result.change_register) {
       const hours = change.estimated_hours === null ? "not estimated" : `${change.estimated_hours} h (${change.estimate_source})`;
-      lines.push(`- **${change.kind}** — ${change.requested_text}`);
-      lines.push(`  - Evidence: ${change.message_id}: “${change.evidence_quote}”`);
-      lines.push(`  - Affected baseline item: ${change.baseline_item_id ?? "not linked"}`);
-      lines.push(`  - Impact: ${hours}; severity ${change.severity}; confidence ${change.confidence}`);
+      lines.push(`- **${change.kind}** — ${markdownInline(change.evidence_quote)}`);
+      lines.push(`  - Evidence: ${markdownInline(change.message_id)}: “${markdownInline(change.evidence_quote)}”`);
+      lines.push(`  - Affected baseline item: ${markdownInline(change.baseline_item_id ?? "not linked")}`);
+      lines.push(`  - Impact: ${markdownInline(hours)}; severity ${markdownInline(change.severity)}; confidence ${markdownInline(change.confidence)}`);
     }
   }
   lines.push("", "## Totals", "");
@@ -438,8 +469,9 @@ export function renderMarkdown(result) {
   lines.push("", "## Action boundary", "");
   lines.push("Analysis only. No email was sent, scheduled, replied to, forwarded, or paid.");
   if (result.draft) {
-    lines.push("", "## Unsent draft", "", `**To:** ${result.draft.to ?? "not set — user must confirm"}`);
-    lines.push(`**Subject:** ${result.draft.subject}`, "", "```text", result.draft.body_text, "```");
+    lines.push("", "## Unsent draft", "", `**To:** ${markdownInline(result.draft.to ?? "not set — user must confirm")}`);
+    lines.push(`**Subject:** ${markdownInline(result.draft.subject)}`, "");
+    lines.push(...result.draft.body_text.split(/\r?\n/).map((line) => `> ${markdownInline(line)}`));
   }
   return `${lines.join("\n")}\n`;
 }

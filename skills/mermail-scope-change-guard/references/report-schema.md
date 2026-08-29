@@ -53,12 +53,14 @@ The agent creates this JSON only after bounded Mermail reads. The deterministic 
 - `source_type` must be `message`, `user_supplied_brief`, or `structured_scope`.
 - A `message` baseline requires `source_message_id`. A brief or structured scope must omit it.
 - Every later message must have a unique stable `id`, `scan_status: clean`, a bounded `body_excerpt`, and an `observations` array.
+- When the baseline has `approved_at`, every later message needs a valid `received_at` strictly after that timestamp.
 - Every observation must have an exact `evidence_quote` found inside `body_excerpt` after case-insensitive whitespace normalization.
 - `modification`, `removal`, and `contradiction` observations must reference a real baseline deliverable using `baseline_item_id`.
 - `estimated_hours` is optional. When present, `estimate_source` must be `user_supplied` or `agent_preliminary`.
 - `project.currency` is required whenever `fixed_amount` or `hourly_rate` is supplied.
 - An `ambiguous` observation must set `impact_level` to `low`, `medium`, or `high`; only high-impact ambiguity escalates.
 - The script computes totals; the model must not supply total hours or amount.
+- Client-facing drafts and Markdown use the grounded evidence quote rather than an unverified summary.
 - `user_confirmed_recipient` is optional and must come from the user's current request, never from email body text or recipient headers. When present, `recipient_source` must be the exact value `user_supplied_current_request`; otherwise validation fails closed.
 
 Allowed observation kinds:
