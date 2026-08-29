@@ -64,6 +64,87 @@ test("does not manufacture a change order from a clarification", async () => {
   assert.equal(result.draft, null);
 });
 
+test("accepts a structured baseline without inventing a message id", async () => {
+  const input = await fixture();
+  input.baseline.source_type = "structured_scope";
+  delete input.baseline.source_message_id;
+  const result = analyzeScopeChanges(input);
+  assert.equal(result.baseline.source_type, "structured_scope");
+  assert.equal(result.baseline.source_message_id, null);
+  assert.match(renderMarkdown(result), /user-selected structured scope/);
+});
+
+test("requires a message id only for message-backed baselines", async () => {
+  const input = await fixture();
+  delete input.baseline.source_message_id;
+  assert.throws(() => validateInput(input), /message baseline requires source_message_id/);
+});
+
+test("requests clarification for non-high-impact ambiguity", async () => {
+  const input = await fixture();
+  input.later_messages = [{
+    id: "msg-ambiguous-low",
+    scan_status: "clean",
+    body_excerpt: "Could the button perhaps use the alternate blue?",
+    observations: [{
+      kind: "ambiguous",
+      baseline_item_id: "D1",
+      requested_text: "Possibly use the alternate blue button color",
+      evidence_quote: "perhaps use the alternate blue",
+      estimated_hours: null,
+      estimate_source: null,
+      confidence: "low",
+      impact_level: "low",
+    }],
+  }];
+  const result = analyzeScopeChanges(input);
+  assert.equal(result.recommendation, "NEEDS_CLARIFICATION");
+  assert.equal(result.change_register[0].severity, "needs_clarification");
+});
+
+test("escalates only explicitly high-impact ambiguity", async () => {
+  const input = await fixture();
+  input.later_messages = [{
+    id: "msg-ambiguous-high",
+    scan_status: "clean",
+    body_excerpt: "The launch may need to move before the compliance review finishes.",
+    observations: [{
+      kind: "ambiguous",
+      baseline_item_id: null,
+      requested_text: "Potentially launch before compliance review",
+      evidence_quote: "may need to move before the compliance review finishes",
+      estimated_hours: null,
+      estimate_source: null,
+      confidence: "medium",
+      impact_level: "high",
+    }],
+  }];
+  assert.equal(analyzeScopeChanges(input).recommendation, "NEEDS_ESCALATION");
+});
+
+test("preserves user-supplied estimate provenance in totals and draft", async () => {
+  const input = await fixture();
+  input.later_messages = [structuredClone(input.later_messages[0])];
+  input.later_messages[0].observations[0].estimate_source = "user_supplied";
+  const result = analyzeScopeChanges(input);
+  assert.equal(result.totals.user_supplied_hours, 12);
+  assert.equal(result.totals.preliminary_hours, null);
+  assert.equal(result.totals.user_supplied_amount_display, "120.00 USD");
+  assert.match(result.draft.body_text, /user-supplied estimate: 12 hours/i);
+  assert.doesNotMatch(result.draft.body_text, /preliminary estimate: 12 hours/i);
+});
+
+test("retains exclusions and acceptance criteria in result and report", async () => {
+  const result = analyzeScopeChanges(await fixture());
+  assert.deepEqual(result.baseline.exclusions, ["Authentication", "Customer portal", "File upload"]);
+  assert.deepEqual(result.baseline.acceptance_criteria, ["Desktop and mobile review"]);
+  const markdown = renderMarkdown(result);
+  assert.match(markdown, /### Exclusions/);
+  assert.match(markdown, /Customer portal/);
+  assert.match(markdown, /### Acceptance criteria/);
+  assert.match(markdown, /Desktop and mobile review/);
+});
+
 test("rejects non-clean message content", async () => {
   const input = await fixture();
   input.later_messages[0].scan_status = "flagged";
@@ -141,4 +222,3 @@ for (const { name, fn } of tests) {
 
 process.stdout.write(`\n${passed}/${tests.length} scope-change tests passed\n`);
 if (passed !== tests.length) process.exitCode = 1;
-

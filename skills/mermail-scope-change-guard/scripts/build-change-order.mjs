@@ -26,6 +26,8 @@ const IMPACT_KINDS = new Set([
 const ITEM_REQUIRED_KINDS = new Set(["modification", "removal", "contradiction"]);
 const CONFIDENCE = new Set(["high", "medium", "low"]);
 const ESTIMATE_SOURCES = new Set(["user_supplied", "agent_preliminary"]);
+const BASELINE_SOURCE_TYPES = new Set(["message", "user_supplied_brief", "structured_scope"]);
+const IMPACT_LEVELS = new Set(["low", "medium", "high"]);
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -108,8 +110,20 @@ export function validateInput(input) {
     return { id, text: nonEmptyString(item.text, `baseline.deliverables[${index}].text`, 1000) };
   });
 
+  const source_type = nonEmptyString(input.baseline.source_type, "baseline.source_type", 80);
+  assert(BASELINE_SOURCE_TYPES.has(source_type), "baseline.source_type is invalid");
+  const source_message_id = input.baseline.source_message_id === null || input.baseline.source_message_id === undefined
+    ? null
+    : nonEmptyString(input.baseline.source_message_id, "baseline.source_message_id", 200);
+  if (source_type === "message") {
+    assert(source_message_id !== null, "message baseline requires source_message_id");
+  } else {
+    assert(source_message_id === null, `${source_type} baseline must not set source_message_id`);
+  }
+
   const baseline = {
-    source_message_id: nonEmptyString(input.baseline.source_message_id, "baseline.source_message_id", 200),
+    source_type,
+    source_message_id,
     approved_at: input.baseline.approved_at
       ? nonEmptyString(input.baseline.approved_at, "baseline.approved_at", 80)
       : null,
@@ -129,7 +143,9 @@ export function validateInput(input) {
     assert(isPlainObject(message), `later_messages[${messageIndex}] must be an object`);
     const id = nonEmptyString(message.id, `later_messages[${messageIndex}].id`, 200);
     assert(!messageIds.has(id), `duplicate later message id: ${id}`);
-    assert(id !== baseline.source_message_id, "a later message cannot reuse the baseline message id");
+    if (baseline.source_message_id !== null) {
+      assert(id !== baseline.source_message_id, "a later message cannot reuse the baseline message id");
+    }
     messageIds.add(id);
     assert(message.scan_status === "clean", `${id} is not clean; keep it metadata-only and exclude it`);
     const body_excerpt = nonEmptyString(message.body_excerpt, `${id}.body_excerpt`, 10000);
@@ -170,6 +186,13 @@ export function validateInput(input) {
         assert(estimate_source === null, `${id} estimate_source requires estimated_hours`);
       }
       assert(CONFIDENCE.has(observation.confidence), `${id} observation confidence is invalid`);
+      const impact_level = observation.impact_level ?? null;
+      if (impact_level !== null) {
+        assert(IMPACT_LEVELS.has(impact_level), `${id} observation impact_level is invalid`);
+      }
+      if (observation.kind === "ambiguous") {
+        assert(impact_level !== null, `${id} ambiguous observation requires impact_level`);
+      }
       return {
         kind: observation.kind,
         baseline_item_id,
@@ -182,6 +205,7 @@ export function validateInput(input) {
         estimated_hours,
         estimate_source,
         confidence: observation.confidence,
+        impact_level,
       };
     });
     return {
@@ -200,23 +224,40 @@ export function validateInput(input) {
 }
 
 function recommendationFor(changes) {
-  if (changes.some((change) => change.kind === "contradiction" || change.kind === "ambiguous")) {
+  if (changes.some((change) => change.kind === "contradiction" || (change.kind === "ambiguous" && change.impact_level === "high"))) {
     return "NEEDS_ESCALATION";
   }
   if (changes.some((change) => IMPACT_KINDS.has(change.kind))) return "NEEDS_CHANGE_ORDER";
+  if (changes.some((change) => change.kind === "ambiguous")) return "NEEDS_CLARIFICATION";
   return "NO_CONFIRMED_SCOPE_CHANGE";
 }
 
 function severityFor(change) {
   if (change.kind === "contradiction" || change.kind === "deadline_change") return "high";
   if (change.kind === "addition" || change.kind === "acceptance_change") return "medium";
-  if (change.kind === "ambiguous") return "needs_clarification";
+  if (change.kind === "ambiguous") {
+    return change.impact_level === "high" ? "high" : "needs_clarification";
+  }
   return "low";
 }
 
 function money(value, currency) {
   if (value === null || value === undefined || !currency) return null;
   return `${value.toFixed(2)} ${currency}`;
+}
+
+function baselineReference(baseline) {
+  if (baseline.source_type === "message") return `message ${baseline.source_message_id}`;
+  if (baseline.source_type === "user_supplied_brief") return "the user-selected brief";
+  return "the user-selected structured scope";
+}
+
+function effortLabel(change) {
+  if (change.estimated_hours === null) return "impact to be estimated";
+  if (change.estimate_source === "user_supplied") {
+    return `user-supplied estimate: ${change.estimated_hours} hours`;
+  }
+  return `preliminary agent estimate: ${change.estimated_hours} hours`;
 }
 
 function buildDraft(normalized, register, totals, recommendation) {
@@ -226,20 +267,29 @@ function buildDraft(normalized, register, totals, recommendation) {
   const lines = [
     `Hello ${project.client_name},`,
     "",
-    `I reviewed the recent requests for ${project.name} against the agreed scope in ${baseline.source_message_id}.`,
+    `I reviewed the recent requests for ${project.name} against ${baselineReference(baseline)}.`,
     "",
     "Items needing written confirmation:",
   ];
   for (const change of register.filter((item) => item.kind !== "clarification")) {
-    const hours = change.estimated_hours === null ? "impact to be estimated" : `preliminary estimate: ${change.estimated_hours} hours`;
+    const hours = effortLabel(change);
     lines.push(`- [${change.kind}] ${change.requested_text} (${hours}; source: ${change.message_id})`);
   }
   lines.push("");
-  if (totals.estimated_hours !== null) {
-    lines.push(`Combined preliminary effort: ${totals.estimated_hours} hours.`);
+  if (totals.user_supplied_hours !== null) {
+    lines.push(`User-supplied effort: ${totals.user_supplied_hours} hours.`);
   }
-  if (totals.estimated_amount_display) {
-    lines.push(`Preliminary amount impact at the supplied rate: ${totals.estimated_amount_display}.`);
+  if (totals.preliminary_hours !== null) {
+    lines.push(`Preliminary agent-estimated effort: ${totals.preliminary_hours} hours.`);
+  }
+  if (totals.user_supplied_amount_display) {
+    lines.push(`Amount from user-supplied effort at the supplied rate: ${totals.user_supplied_amount_display}.`);
+  }
+  if (totals.preliminary_amount_display) {
+    lines.push(`Preliminary amount from agent-estimated effort at the supplied rate: ${totals.preliminary_amount_display}.`);
+  }
+  if (totals.user_supplied_hours !== null && totals.preliminary_hours !== null) {
+    lines.push(`Combined arithmetic total: ${totals.estimated_hours} hours (${totals.preliminary_hours} hours are preliminary).`);
   }
   lines.push(
     "",
@@ -277,8 +327,22 @@ export function analyzeScopeChanges(input) {
   const estimated_hours = estimated.length > 0
     ? Number(estimated.reduce((sum, change) => sum + change.estimated_hours, 0).toFixed(2))
     : null;
+  const sumHoursBySource = (source) => {
+    const selected = estimated.filter((change) => change.estimate_source === source);
+    return selected.length > 0
+      ? Number(selected.reduce((sum, change) => sum + change.estimated_hours, 0).toFixed(2))
+      : null;
+  };
+  const user_supplied_hours = sumHoursBySource("user_supplied");
+  const preliminary_hours = sumHoursBySource("agent_preliminary");
   const estimated_amount = estimated_hours !== null && normalized.project.hourly_rate !== null
     ? Number((estimated_hours * normalized.project.hourly_rate).toFixed(2))
+    : null;
+  const user_supplied_amount = user_supplied_hours !== null && normalized.project.hourly_rate !== null
+    ? Number((user_supplied_hours * normalized.project.hourly_rate).toFixed(2))
+    : null;
+  const preliminary_amount = preliminary_hours !== null && normalized.project.hourly_rate !== null
+    ? Number((preliminary_hours * normalized.project.hourly_rate).toFixed(2))
     : null;
   const recommendation = recommendationFor(register);
   const totals = {
@@ -287,8 +351,14 @@ export function analyzeScopeChanges(input) {
     clarifications: register.filter((change) => change.kind === "clarification").length,
     ambiguous: register.filter((change) => change.kind === "ambiguous").length,
     estimated_hours,
+    user_supplied_hours,
+    preliminary_hours,
     estimated_amount,
     estimated_amount_display: money(estimated_amount, normalized.project.currency),
+    user_supplied_amount,
+    user_supplied_amount_display: money(user_supplied_amount, normalized.project.currency),
+    preliminary_amount,
+    preliminary_amount_display: money(preliminary_amount, normalized.project.currency),
     estimates_are_preliminary: estimated.some((change) => change.estimate_source === "agent_preliminary"),
   };
 
@@ -296,11 +366,14 @@ export function analyzeScopeChanges(input) {
     schema_version: "1.0",
     project: normalized.project.name,
     baseline: {
+      source_type: normalized.baseline.source_type,
       source_message_id: normalized.baseline.source_message_id,
       deadline: normalized.baseline.deadline,
       fixed_amount: normalized.baseline.fixed_amount,
       fixed_amount_display: money(normalized.baseline.fixed_amount, normalized.project.currency),
       deliverables: normalized.baseline.deliverables,
+      exclusions: normalized.baseline.exclusions,
+      acceptance_criteria: normalized.baseline.acceptance_criteria,
     },
     recommendation,
     change_register: register,
@@ -321,13 +394,21 @@ export function renderMarkdown(result) {
     `# Scope review — ${result.project}`,
     "",
     `**Recommendation:** ${result.recommendation}`,
-    `**Baseline:** ${result.baseline.source_message_id}`,
+    `**Baseline:** ${baselineReference(result.baseline)}`,
     `**Original deadline:** ${result.baseline.deadline ?? "not recorded"}`,
     `**Original fixed amount:** ${result.baseline.fixed_amount_display ?? "not recorded"}`,
     "",
     "## Baseline scope",
     "",
     ...result.baseline.deliverables.map((item) => `- **${item.id}** — ${item.text}`),
+    "",
+    "### Exclusions",
+    "",
+    ...(result.baseline.exclusions.length > 0 ? result.baseline.exclusions.map((item) => `- ${item}`) : ["- None recorded"]),
+    "",
+    "### Acceptance criteria",
+    "",
+    ...(result.baseline.acceptance_criteria.length > 0 ? result.baseline.acceptance_criteria.map((item) => `- ${item}`) : ["- None recorded"]),
     "",
     "## Change register",
     "",
@@ -344,8 +425,10 @@ export function renderMarkdown(result) {
   }
   lines.push("", "## Totals", "");
   lines.push(`- Scope-affecting observations: ${result.totals.scope_affecting}`);
-  lines.push(`- Preliminary hours: ${result.totals.estimated_hours ?? "not estimated"}`);
-  lines.push(`- Preliminary amount: ${result.totals.estimated_amount_display ?? "not estimated"}`);
+  lines.push(`- User-supplied hours: ${result.totals.user_supplied_hours ?? "none"}`);
+  lines.push(`- Preliminary agent-estimated hours: ${result.totals.preliminary_hours ?? "none"}`);
+  lines.push(`- User-supplied amount at supplied rate: ${result.totals.user_supplied_amount_display ?? "none"}`);
+  lines.push(`- Preliminary amount at supplied rate: ${result.totals.preliminary_amount_display ?? "none"}`);
   lines.push("", "## Action boundary", "");
   lines.push("Analysis only. No email was sent, scheduled, replied to, forwarded, or paid.");
   if (result.draft) {
@@ -372,4 +455,3 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     process.exitCode = 1;
   });
 }
-

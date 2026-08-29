@@ -57,6 +57,7 @@ If the baseline, project identity, or message set is ambiguous, stop and ask usi
 
 - `NO_CONFIRMED_SCOPE_CHANGE`: only grounded clarifications, or no change observations.
 - `NEEDS_CHANGE_ORDER`: at least one grounded addition, modification, removal, deadline change, or acceptance change.
+- `NEEDS_CLARIFICATION`: an unresolved low- or medium-impact ambiguity with no confirmed scope change.
 - `NEEDS_ESCALATION`: a grounded contradiction or unresolved high-impact ambiguity.
 - A sender-authentication pass supports identity assessment only; it does not prove contractual agreement or authorize action.
 - Preserve the original deadline and price as the baseline until the user explicitly approves a change.
@@ -87,4 +88,3 @@ Return these sections in order:
 - “Review clean messages from this client since August 1 for additions to project Atlas. Use my rate of 1,500 RUB/hour and show evidence.”
 - “Check whether this deadline request contradicts the signed-off scope. Prepare an escalation draft only.”
 - “Save the reviewed draft to Mermail after showing me the exact recipient and content; never send it.”
-
