@@ -54,6 +54,18 @@ function normalizeEvidence(value) {
   return value.toLocaleLowerCase("en-US").replace(/\s+/g, " ").trim();
 }
 
+function newlyAuthoredExcerpt(value) {
+  const lines = value.replace(/\r\n?/g, "\n").split("\n");
+  const authored = [];
+  const quoteMarker = /^(?:\s*>|\s*On .+wrote:\s*$|\s*-{2,}\s*(?:Original Message|Forwarded message)\s*-{2,}\s*$|\s*_{5,}\s*$|\s*(?:From|Sent|To|Subject):\s+.+$)/i;
+  for (const line of lines) {
+    if (quoteMarker.test(line) && authored.some((item) => item.trim().length > 0)) break;
+    if (quoteMarker.test(line)) continue;
+    authored.push(line);
+  }
+  return authored.join("\n").trim();
+}
+
 function validateStringArray(value, label, maxItems = 50) {
   assert(Array.isArray(value), `${label} must be an array`);
   assert(value.length <= maxItems, `${label} exceeds ${maxItems} items`);
@@ -147,10 +159,23 @@ export function validateInput(input) {
   } else {
     assert(source_message_id === null, `${source_type} baseline must not set source_message_id`);
   }
+  const baseline_scan_status = input.baseline.scan_status ?? null;
+  const baseline_body_excerpt = input.baseline.body_excerpt === null || input.baseline.body_excerpt === undefined
+    ? null
+    : nonEmptyString(input.baseline.body_excerpt, "baseline.body_excerpt", 10000);
+  if (source_type === "message") {
+    assert(baseline_scan_status === "clean", "message baseline requires scan_status=clean");
+    assert(baseline_body_excerpt !== null, "message baseline requires body_excerpt");
+  } else {
+    assert(baseline_scan_status === null, `${source_type} baseline must not set scan_status`);
+    assert(baseline_body_excerpt === null, `${source_type} baseline must not set body_excerpt`);
+  }
 
   const baseline = {
     source_type,
     source_message_id,
+    scan_status: baseline_scan_status,
+    body_excerpt: baseline_body_excerpt,
     approved_at: optionalIsoTimestamp(input.baseline.approved_at, "baseline.approved_at"),
     deadline: input.baseline.deadline ? nonEmptyString(input.baseline.deadline, "baseline.deadline", 80) : null,
     fixed_amount: optionalFiniteNumber(input.baseline.fixed_amount, "baseline.fixed_amount"),
@@ -163,6 +188,29 @@ export function validateInput(input) {
   };
   if (project.hourly_rate !== null || baseline.fixed_amount !== null) {
     assert(project.currency !== null, "monetary inputs require project.currency");
+  }
+  if (baseline.source_type === "message") {
+    const normalizedBaselineBody = normalizeEvidence(baseline.body_excerpt);
+    const requireBaselineGrounding = (value, label) => {
+      assert(
+        normalizedBaselineBody.includes(normalizeEvidence(String(value))),
+        `${label} is not grounded in baseline.body_excerpt`,
+      );
+    };
+    for (const item of baseline.deliverables) {
+      requireBaselineGrounding(item.text, `baseline deliverable ${item.id}`);
+    }
+    for (const [index, item] of baseline.exclusions.entries()) {
+      requireBaselineGrounding(item, `baseline.exclusions[${index}]`);
+    }
+    for (const [index, item] of baseline.acceptance_criteria.entries()) {
+      requireBaselineGrounding(item, `baseline.acceptance_criteria[${index}]`);
+    }
+    if (baseline.deadline !== null) requireBaselineGrounding(baseline.deadline, "baseline.deadline");
+    if (baseline.fixed_amount !== null) {
+      requireBaselineGrounding(baseline.fixed_amount, "baseline.fixed_amount");
+      requireBaselineGrounding(project.currency, "project.currency for baseline.fixed_amount");
+    }
   }
 
   const messageIds = new Set();
@@ -181,7 +229,9 @@ export function validateInput(input) {
     assert(totalChars <= 50000, "selected message bodies exceed the 50,000-character review budget");
     assert(Array.isArray(message.observations), `${id}.observations must be an array`);
     assert(message.observations.length <= 20, `${id}.observations exceeds 20 items`);
-    const normalizedBody = normalizeEvidence(body_excerpt);
+    const authored_excerpt = newlyAuthoredExcerpt(body_excerpt);
+    assert(authored_excerpt.length > 0, `${id} has no newly authored content after quoted history is removed`);
+    const normalizedBody = normalizeEvidence(authored_excerpt);
     const observations = message.observations.map((observation, observationIndex) => {
       assert(isPlainObject(observation), `${id}.observations[${observationIndex}] must be an object`);
       assert(CHANGE_KINDS.has(observation.kind), `${id}.observations[${observationIndex}].kind is invalid`);
@@ -250,6 +300,7 @@ export function validateInput(input) {
       sender: message.sender ? nonEmptyString(message.sender, `${id}.sender`, 320) : null,
       scan_status: "clean",
       body_excerpt,
+      authored_excerpt,
       observations,
     };
   });

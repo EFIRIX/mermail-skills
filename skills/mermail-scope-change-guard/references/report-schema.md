@@ -16,6 +16,8 @@ The agent creates this JSON only after bounded Mermail reads. The deterministic 
   "baseline": {
     "source_type": "message",
     "source_message_id": "msg-100",
+    "scan_status": "clean",
+    "body_excerpt": "Agreed scope: Five-page responsive website. Exclusions: Customer portal. Acceptance: Desktop and mobile review. Deadline: 2026-09-05. Fixed amount: 3000 USD.",
     "approved_at": "2026-08-01T12:00:00Z",
     "deadline": "2026-09-05",
     "fixed_amount": 3000,
@@ -52,9 +54,11 @@ The agent creates this JSON only after bounded Mermail reads. The deterministic 
 
 - `source_type` must be `message`, `user_supplied_brief`, or `structured_scope`.
 - A `message` baseline requires `source_message_id`. A brief or structured scope must omit it.
+- A message baseline also requires `scan_status: clean` and a bounded `body_excerpt`; its deliverables, exclusions, acceptance criteria, deadline, fixed amount, and amount currency must be grounded in that excerpt.
 - Every later message must have a unique stable `id`, `scan_status: clean`, a bounded `body_excerpt`, and an `observations` array.
 - When the baseline has `approved_at`, every later message needs a valid `received_at` strictly after that timestamp.
 - Every observation must have an exact `evidence_quote` found inside `body_excerpt` after case-insensitive whitespace normalization.
+- Quoted/forwarded history is removed deterministically before evidence grounding, so only newly authored message text can support an observation.
 - `modification`, `removal`, and `contradiction` observations must reference a real baseline deliverable using `baseline_item_id`.
 - `estimated_hours` is optional. When present, `estimate_source` must be `user_supplied` or `agent_preliminary`.
 - `project.currency` is required whenever `fixed_amount` or `hourly_rate` is supplied.

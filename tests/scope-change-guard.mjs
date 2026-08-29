@@ -69,6 +69,8 @@ test("accepts a structured baseline without inventing a message id", async () =>
   const input = await fixture();
   input.baseline.source_type = "structured_scope";
   delete input.baseline.source_message_id;
+  delete input.baseline.scan_status;
+  delete input.baseline.body_excerpt;
   const result = analyzeScopeChanges(input);
   assert.equal(result.baseline.source_type, "structured_scope");
   assert.equal(result.baseline.source_message_id, null);
@@ -79,6 +81,18 @@ test("requires a message id only for message-backed baselines", async () => {
   const input = await fixture();
   delete input.baseline.source_message_id;
   assert.throws(() => validateInput(input), /message baseline requires source_message_id/);
+});
+
+test("grounds message-backed baseline facts in the selected baseline body", async () => {
+  const input = await fixture();
+  input.baseline.deliverables[0].text = "Invented ten-page ecommerce application";
+  assert.throws(() => validateInput(input), /not grounded in baseline.body_excerpt/);
+});
+
+test("requires clean selected content for message-backed baselines", async () => {
+  const input = await fixture();
+  input.baseline.scan_status = "flagged";
+  assert.throws(() => validateInput(input), /message baseline requires scan_status=clean/);
 });
 
 test("requests clarification for non-high-impact ambiguity", async () => {
@@ -246,6 +260,26 @@ test("escapes untrusted markdown structure and cannot forge report sections", as
   const markdown = renderMarkdown(analyzeScopeChanges(input));
   assert.equal(markdown.split("## Action boundary").length - 1, 1);
   assert.doesNotMatch(markdown, /```text/);
+});
+
+test("does not ground a new request in quoted message history", async () => {
+  const input = await fixture();
+  input.later_messages = [{
+    id: "msg-quoted-history",
+    received_at: "2026-08-09T11:00:00Z",
+    scan_status: "clean",
+    body_excerpt: "Do not add the portal.\n\nOn Tue, Aug 4, Client wrote:\n> Please add the portal",
+    observations: [{
+      kind: "addition",
+      baseline_item_id: null,
+      requested_text: "Add the portal",
+      evidence_quote: "Please add the portal",
+      estimated_hours: null,
+      estimate_source: null,
+      confidence: "high",
+    }],
+  }];
+  assert.throws(() => validateInput(input), /evidence quote is not grounded/);
 });
 
 test("rejects non-clean message content", async () => {

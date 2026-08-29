@@ -11,6 +11,8 @@
   "baseline": {
     "source_type": "message",
     "source_message_id": "msg-baseline-100",
+    "scan_status": "clean",
+    "body_excerpt": "Agreed scope: Five-page responsive marketing website using client-supplied copy. Exclusions: Authentication, Customer portal, File upload. Acceptance: Desktop and mobile review. Deadline: 2026-09-05. Fixed amount: 300 USD.",
     "approved_at": "2026-08-01T12:00:00Z",
     "deadline": "2026-09-05",
     "fixed_amount": 300,
