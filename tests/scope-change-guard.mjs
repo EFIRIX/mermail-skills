@@ -438,6 +438,29 @@ test("shared content budget includes baseline at exact 50000 boundary", async ()
   assert.throws(() => validateInput(input), /50,000-character review budget/);
 });
 
+test("spaced and Unicode signs or fraction bars cannot ground a positive fixed price", async () => {
+  for (const source of ["- 300 USD", "−300 USD", "− 300 USD", "+ 300 USD", "＋300 USD", "－ 300 USD", "1/300 USD", "1 / 300 USD", "1⁄300 USD", "1∕ 300 USD", "- USD 300", "1 / USD 300"]) {
+    const input = await fixture();
+    input.baseline.body_excerpt = input.baseline.body_excerpt.replace("300 USD", source);
+    assert.throws(() => validateInput(input), /exact amount\/currency pair/, source);
+  }
+  const ordinary = await fixture();
+  ordinary.baseline.body_excerpt = ordinary.baseline.body_excerpt.replace("300 USD", "USD 300.00");
+  assert.equal(validateInput(ordinary).baseline.fixed_amount, 300);
+});
+
+test("raw whitespace padding consumes the shared intake budget before trimming", async () => {
+  const input = await fixture();
+  input.baseline.body_excerpt = input.baseline.body_excerpt.padStart(10000, " ");
+  input.later_messages = Array.from({ length: 4 }, (_, index) => ({
+    id: `padded-${index}`, received_at: "2026-08-09T12:00:00Z", scan_status: "clean",
+    body_excerpt: "x".padStart(10000, " "), observations: [],
+  }));
+  validateInput(input);
+  input.later_messages.push({ id: "padding-over", received_at: "2026-08-09T12:00:00Z", scan_status: "clean", body_excerpt: " x ", observations: [] });
+  assert.throws(() => validateInput(input), /50,000-character review budget/);
+});
+
 test("actual offline CLI rejects bad dates, false amount matches and shared overflow", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "scope-change-cli-"));
   const bin = path.resolve(here, "../skills/mermail-scope-change-guard/scripts/build-change-order.mjs");
@@ -462,7 +485,20 @@ test("actual offline CLI rejects bad dates, false amount matches and shared over
     id: `cli-budget-${index}`, received_at: "2026-08-09T12:00:00Z", scan_status: "clean",
     body_excerpt: "x".repeat(10000), observations: [],
   }));
-  for (const [name, input] of [["date", badDate], ["amount", badAmount], ["budget", overBudget]]) {
+  const rejected = [["date", badDate], ["amount", badAmount], ["budget", overBudget]];
+  for (const [index, source] of ["- 300 USD", "−300 USD", "1/300 USD"].entries()) {
+    const input = await fixture();
+    input.baseline.body_excerpt = input.baseline.body_excerpt.replace("300 USD", source);
+    rejected.push([`signed-or-fraction-${index}`, input]);
+  }
+  const padded = await fixture();
+  padded.baseline.body_excerpt = padded.baseline.body_excerpt.padStart(10000, " ");
+  padded.later_messages = Array.from({ length: 8 }, (_, index) => ({
+    id: `raw-padding-${index}`, received_at: "2026-08-09T12:00:00Z", scan_status: "clean",
+    body_excerpt: "x".padStart(10000, " "), observations: [],
+  }));
+  rejected.push(["raw-padding", padded]);
+  for (const [name, input] of rejected) {
     const result = await run(input, name);
     assert.equal(result.status, 1, result.stdout);
     assert.equal(result.stdout, "");

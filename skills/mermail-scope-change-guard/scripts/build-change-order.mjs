@@ -86,6 +86,10 @@ function sourceAmountMatches(body, amount, currency) {
   const pair = new RegExp(`(?<![\\p{L}\\p{N}_.,+\\-])(?:(${number})\\s+${currency}|${currency}\\s+(${number}))(?![\\p{L}\\p{N}_,]|\\.(?!\\s|$))`, "giu");
   const expected = decimal(amount);
   return [...body.matchAll(pair)].some(match => {
+    // A separated sign or fraction bar still belongs to the number. Do not
+    // turn a negative value, signed format or fraction denominator positive.
+    const before = body.slice(0, match.index).trimEnd();
+    if (/[+\-\u2212\uFE62\uFE63\uFF0B\uFF0D\p{Dash_Punctuation}/\u2044\u2215]$/u.test(before)) return false;
     const found = decimal(match[1] ?? match[2]);
     const scale = Math.max(found.scale, expected.scale);
     return found.units * 10n ** BigInt(scale - found.scale) === expected.units * 10n ** BigInt(scale - expected.scale);
@@ -266,7 +270,7 @@ export function validateInput(input) {
   }
 
   const messageIds = new Set();
-  let totalChars = baseline.body_excerpt?.length ?? 0;
+  let totalChars = input.baseline.body_excerpt?.length ?? 0;
   const later_messages = input.later_messages.map((message, messageIndex) => {
     assert(isPlainObject(message), `later_messages[${messageIndex}] must be an object`);
     const id = nonEmptyString(message.id, `later_messages[${messageIndex}].id`, 200);
@@ -277,7 +281,7 @@ export function validateInput(input) {
     messageIds.add(id);
     assert(message.scan_status === "clean", `${id} is not clean; keep it metadata-only and exclude it`);
     const body_excerpt = nonEmptyString(message.body_excerpt, `${id}.body_excerpt`, 10000);
-    totalChars += body_excerpt.length;
+    totalChars += message.body_excerpt.length;
     assert(totalChars <= 50000, "selected message bodies exceed the 50,000-character review budget");
     assert(Array.isArray(message.observations), `${id}.observations must be an array`);
     assert(message.observations.length <= 20, `${id}.observations exceeds 20 items`);
