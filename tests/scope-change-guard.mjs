@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdtemp, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
@@ -345,6 +347,127 @@ test("renders the evidence, baseline, totals, and unsent boundary", async () => 
   assert.match(markdown, /150\.00 USD/);
   assert.match(markdown, /Unsent draft/);
   assert.match(markdown, /No email was sent/);
+});
+
+test("prices fractional effort before rounding and keeps exact decimal sums", async () => {
+  const input = await fixture();
+  input.later_messages = [input.later_messages[0]];
+  input.project.hourly_rate = 100;
+  input.later_messages[0].observations[0].estimated_hours = 0.005;
+  let result = analyzeScopeChanges(input);
+  assert.equal(result.totals.estimated_hours, 0.005);
+  assert.equal(result.totals.estimated_amount_display, "0.50 USD");
+  input.project.hourly_rate = 1;
+  input.later_messages[0].observations[0].estimated_hours = 1.005;
+  assert.equal(analyzeScopeChanges(input).totals.estimated_amount_display, "1.01 USD");
+  const original = input.later_messages[0].observations[0];
+  input.later_messages[0].observations = [0.1, 0.2].map(estimated_hours => ({ ...original, estimated_hours }));
+  result = analyzeScopeChanges(input);
+  assert.equal(result.totals.estimated_hours, 0.3);
+  assert.equal(result.totals.estimated_amount, 0.3);
+});
+
+test("zero, tiny, mixed-source and bounded maximum arithmetic stay useful", async () => {
+  const input = await fixture();
+  input.later_messages = [input.later_messages[0]];
+  const original = input.later_messages[0].observations[0];
+  for (const [hours, rate, expected] of [[0, 100, 0], [1e-7, 1e6, 0.1], [5e-324, 1e6, 0], [1000, 1e6, 1e9]]) {
+    input.project.hourly_rate = rate;
+    input.later_messages[0].observations = [{ ...original, estimated_hours: hours }];
+    assert.equal(analyzeScopeChanges(input).totals.estimated_amount, expected);
+  }
+  input.project.hourly_rate = 100;
+  input.later_messages[0].observations = [
+    { ...original, estimated_hours: 0.005, estimate_source: "user_supplied" },
+    { ...original, estimated_hours: 0.015, estimate_source: "agent_preliminary" },
+  ];
+  const totals = analyzeScopeChanges(input).totals;
+  assert.equal(totals.user_supplied_amount, 0.5);
+  assert.equal(totals.preliminary_amount, 1.5);
+  assert.equal(totals.estimated_amount, 2);
+});
+
+test("calendar-invalid dates and out-of-range clocks/offsets fail closed", async () => {
+  for (const timestamp of ["2026-02-30T12:00:00Z", "2026-02-29T12:00:00Z", "1900-02-29T12:00:00Z", "2026-04-31T12:00:00Z", "2026-00-01T00:00:00Z", "2026-01-01T24:00:00Z", "2026-01-01T00:60:00Z", "2026-01-01T00:00:60Z", "2026-01-01T00:00:00+24:00", "2026-01-01T00:00:00+01:60"]) {
+    const input = await fixture();
+    input.baseline.approved_at = timestamp;
+    assert.throws(() => validateInput(input), /valid calendar timestamp/, timestamp);
+    input.baseline.approved_at = "2026-01-01T00:00:00Z";
+    input.later_messages[0].received_at = timestamp;
+    assert.throws(() => validateInput(input), /valid calendar timestamp/, timestamp);
+  }
+});
+
+test("valid leap dates, offsets and sub-millisecond chronological ordering survive", async () => {
+  const input = await fixture();
+  input.baseline.approved_at = "2000-02-29T12:00:00+02:00";
+  assert.equal(validateInput(input).baseline.approved_at, input.baseline.approved_at);
+  input.baseline.approved_at = "2026-08-01T12:00:00.000000001Z";
+  input.later_messages = [input.later_messages[0]];
+  input.later_messages[0].received_at = "2026-08-01T14:00:00.000000002+02:00";
+  validateInput(input);
+  input.later_messages[0].received_at = "2026-08-01T14:00:00.000000001+02:00";
+  assert.throws(() => validateInput(input), /must be after/);
+});
+
+test("fixed price requires the exact whole amount and adjacent currency", async () => {
+  const input = await fixture();
+  input.baseline.fixed_amount = 30;
+  assert.throws(() => validateInput(input), /exact amount\/currency pair/);
+  for (const source of ["3000 USD", "USD 3000", "-300 USD", "+300 USD", "1,300 USD", "USD 300.0.99", "300EUR and currency USD", "x300 USD", "300 USDX", "300 USD.example"]) {
+    const changed = await fixture();
+    changed.baseline.body_excerpt = changed.baseline.body_excerpt.replace("300 USD", source);
+    assert.throws(() => validateInput(changed), /exact amount\/currency pair/, source);
+  }
+  for (const source of ["300 USD", "USD 300", "USD 300.00", "300.000 usd"]) {
+    const changed = await fixture();
+    changed.baseline.body_excerpt = changed.baseline.body_excerpt.replace("300 USD", source);
+    assert.equal(validateInput(changed).baseline.fixed_amount, 300);
+  }
+});
+
+test("shared content budget includes baseline at exact 50000 boundary", async () => {
+  const input = await fixture();
+  input.baseline.body_excerpt = `${input.baseline.body_excerpt} `.padEnd(10000, "x");
+  input.later_messages = Array.from({ length: 4 }, (_, index) => ({
+    id: `budget-${index}`, received_at: "2026-08-09T12:00:00Z", scan_status: "clean",
+    body_excerpt: "x".repeat(10000), observations: [],
+  }));
+  validateInput(input);
+  input.later_messages.push({ id: "one-over", received_at: "2026-08-09T12:00:00Z", scan_status: "clean", body_excerpt: "x", observations: [] });
+  assert.throws(() => validateInput(input), /50,000-character review budget/);
+});
+
+test("actual offline CLI rejects bad dates, false amount matches and shared overflow", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "scope-change-cli-"));
+  const bin = path.resolve(here, "../skills/mermail-scope-change-guard/scripts/build-change-order.mjs");
+  const run = async (input, name) => {
+    const file = path.join(directory, `${name}.json`);
+    await writeFile(file, JSON.stringify(input));
+    return spawnSync(process.execPath, [bin, file], { encoding: "utf8" });
+  };
+  const valid = await fixture();
+  valid.later_messages = [valid.later_messages[0]];
+  valid.later_messages[0].observations[0].estimated_hours = 0.005;
+  valid.project.hourly_rate = 100;
+  const positive = await run(valid, "fractional-valid");
+  assert.equal(positive.status, 0, positive.stderr);
+  assert.equal(JSON.parse(positive.stdout).totals.estimated_amount, 0.5);
+  const badDate = await fixture();
+  badDate.baseline.approved_at = "2026-02-30T12:00:00Z";
+  const badAmount = await fixture();
+  badAmount.baseline.fixed_amount = 30;
+  const overBudget = await fixture();
+  overBudget.later_messages = Array.from({ length: 5 }, (_, index) => ({
+    id: `cli-budget-${index}`, received_at: "2026-08-09T12:00:00Z", scan_status: "clean",
+    body_excerpt: "x".repeat(10000), observations: [],
+  }));
+  for (const [name, input] of [["date", badDate], ["amount", badAmount], ["budget", overBudget]]) {
+    const result = await run(input, name);
+    assert.equal(result.status, 1, result.stdout);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /Scope guard rejected input/);
+  }
 });
 
 let passed = 0;

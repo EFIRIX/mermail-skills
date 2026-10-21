@@ -54,6 +54,44 @@ function normalizeEvidence(value) {
   return value.toLocaleLowerCase("en-US").replace(/\s+/g, " ").trim();
 }
 
+// Exact decimal arithmetic over the canonical decimal spelling of validated
+// JSON numbers. This does not recover precision lost before JSON was parsed.
+function decimal(value) {
+  const [mantissa, exponent = "0"] = String(value).toLowerCase().split("e");
+  const [whole, fraction = ""] = mantissa.split(".");
+  const scale = fraction.length - Number(exponent);
+  const units = BigInt(whole + fraction);
+  return scale < 0 ? { units: units * 10n ** BigInt(-scale), scale: 0 } : { units, scale };
+}
+
+function addDecimal(a, b) {
+  const scale = Math.max(a.scale, b.scale);
+  return { units: a.units * 10n ** BigInt(scale - a.scale) + b.units * 10n ** BigInt(scale - b.scale), scale };
+}
+
+function roundedDecimal(value, places = 2) {
+  if (value === null) return null;
+  const divisor = 10n ** BigInt(Math.max(0, value.scale - places));
+  const rounded = value.scale <= places
+    ? value.units * 10n ** BigInt(places - value.scale)
+    : value.units / divisor + (value.units % divisor * 2n >= divisor ? 1n : 0n);
+  const digits = rounded.toString().padStart(places + 1, "0");
+  return places ? `${digits.slice(0, -places)}.${digits.slice(-places)}` : digits;
+}
+
+function sourceAmountMatches(body, amount, currency) {
+  // A whole plain-decimal amount and its adjacent ISO currency, not a
+  // substring of another number, grouped/malformed amount, identifier or code.
+  const number = "(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?";
+  const pair = new RegExp(`(?<![\\p{L}\\p{N}_.,+\\-])(?:(${number})\\s+${currency}|${currency}\\s+(${number}))(?![\\p{L}\\p{N}_,]|\\.(?!\\s|$))`, "giu");
+  const expected = decimal(amount);
+  return [...body.matchAll(pair)].some(match => {
+    const found = decimal(match[1] ?? match[2]);
+    const scale = Math.max(found.scale, expected.scale);
+    return found.units * 10n ** BigInt(scale - found.scale) === expected.units * 10n ** BigInt(scale - expected.scale);
+  });
+}
+
 function newlyAuthoredExcerpt(value) {
   const lines = value.replace(/\r\n?/g, "\n").split("\n");
   const authored = [];
@@ -75,12 +113,26 @@ function validateStringArray(value, label, maxItems = 50) {
 function optionalIsoTimestamp(value, label) {
   if (value === null || value === undefined) return null;
   const timestamp = nonEmptyString(value, label, 80);
+  const match = timestamp.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(?:Z|[+-](\d{2}):(\d{2}))$/);
   assert(
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(timestamp),
+    match,
     `${label} must be an ISO 8601 timestamp with timezone`,
   );
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  assert(month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1]
+    && hour <= 23 && minute <= 59 && second <= 59
+    && Number(match[8] ?? 0) <= 23 && Number(match[9] ?? 0) <= 59,
+  `${label} must be a valid calendar timestamp`);
   assert(Number.isFinite(Date.parse(timestamp)), `${label} must be a valid timestamp`);
   return timestamp;
+}
+
+function timestampNanos(value) {
+  const fraction = value.match(/\.(\d+)(?=Z|[+-])/u)?.[1] ?? "";
+  return BigInt(Date.parse(value.replace(/\.\d+(?=Z|[+-])/u, ""))) * 1_000_000n
+    + BigInt(fraction.padEnd(9, "0"));
 }
 
 function safePlainText(value) {
@@ -208,13 +260,13 @@ export function validateInput(input) {
     }
     if (baseline.deadline !== null) requireBaselineGrounding(baseline.deadline, "baseline.deadline");
     if (baseline.fixed_amount !== null) {
-      requireBaselineGrounding(baseline.fixed_amount, "baseline.fixed_amount");
-      requireBaselineGrounding(project.currency, "project.currency for baseline.fixed_amount");
+      assert(sourceAmountMatches(baseline.body_excerpt, baseline.fixed_amount, project.currency),
+        "baseline.fixed_amount and currency are not grounded as an exact amount/currency pair in baseline.body_excerpt");
     }
   }
 
   const messageIds = new Set();
-  let totalChars = 0;
+  let totalChars = baseline.body_excerpt?.length ?? 0;
   const later_messages = input.later_messages.map((message, messageIndex) => {
     assert(isPlainObject(message), `later_messages[${messageIndex}] must be an object`);
     const id = nonEmptyString(message.id, `later_messages[${messageIndex}].id`, 200);
@@ -290,7 +342,7 @@ export function validateInput(input) {
     if (baseline.approved_at !== null) {
       assert(received_at !== null, `${id}.received_at is required when baseline.approved_at is set`);
       assert(
-        Date.parse(received_at) > Date.parse(baseline.approved_at),
+        timestampNanos(received_at) > timestampNanos(baseline.approved_at),
         `${id}.received_at must be after baseline.approved_at`,
       );
     }
@@ -328,7 +380,7 @@ function severityFor(change) {
 
 function money(value, currency) {
   if (value === null || value === undefined || !currency) return null;
-  return `${value.toFixed(2)} ${currency}`;
+  return `${roundedDecimal(decimal(value))} ${currency}`;
 }
 
 function baselineReference(baseline) {
@@ -411,26 +463,24 @@ export function analyzeScopeChanges(input) {
   const estimated = register.filter(
     (change) => IMPACT_KINDS.has(change.kind) && change.estimated_hours !== null,
   );
-  const estimated_hours = estimated.length > 0
-    ? Number(estimated.reduce((sum, change) => sum + change.estimated_hours, 0).toFixed(2))
-    : null;
-  const sumHoursBySource = (source) => {
-    const selected = estimated.filter((change) => change.estimate_source === source);
-    return selected.length > 0
-      ? Number(selected.reduce((sum, change) => sum + change.estimated_hours, 0).toFixed(2))
-      : null;
+  const sumHours = selected => selected.length
+    ? selected.reduce((sum, change) => addDecimal(sum, decimal(change.estimated_hours)), decimal(0)) : null;
+  const exactHours = sumHours(estimated);
+  const exactUserHours = sumHours(estimated.filter(change => change.estimate_source === "user_supplied"));
+  const exactPreliminaryHours = sumHours(estimated.filter(change => change.estimate_source === "agent_preliminary"));
+  const displayNumber = value => value === null ? null : Number(roundedDecimal(value));
+  const price = hours => {
+    if (hours === null || normalized.project.hourly_rate === null) return null;
+    const rate = decimal(normalized.project.hourly_rate);
+    return displayNumber({ units: hours.units * rate.units, scale: hours.scale + rate.scale });
   };
-  const user_supplied_hours = sumHoursBySource("user_supplied");
-  const preliminary_hours = sumHoursBySource("agent_preliminary");
-  const estimated_amount = estimated_hours !== null && normalized.project.hourly_rate !== null
-    ? Number((estimated_hours * normalized.project.hourly_rate).toFixed(2))
-    : null;
-  const user_supplied_amount = user_supplied_hours !== null && normalized.project.hourly_rate !== null
-    ? Number((user_supplied_hours * normalized.project.hourly_rate).toFixed(2))
-    : null;
-  const preliminary_amount = preliminary_hours !== null && normalized.project.hourly_rate !== null
-    ? Number((preliminary_hours * normalized.project.hourly_rate).toFixed(2))
-    : null;
+  const hoursNumber = value => value === null ? null : Number(roundedDecimal(value, value.scale));
+  const estimated_hours = hoursNumber(exactHours);
+  const user_supplied_hours = hoursNumber(exactUserHours);
+  const preliminary_hours = hoursNumber(exactPreliminaryHours);
+  const estimated_amount = price(exactHours);
+  const user_supplied_amount = price(exactUserHours);
+  const preliminary_amount = price(exactPreliminaryHours);
   const recommendation = recommendationFor(register);
   const totals = {
     observations: register.length,
