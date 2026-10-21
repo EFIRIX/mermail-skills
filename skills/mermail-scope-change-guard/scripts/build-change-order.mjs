@@ -462,7 +462,17 @@ export function analyzeScopeChanges(input) {
       });
     }
   }
-  register.sort((a, b) => `${a.received_at ?? ""}:${a.message_id}`.localeCompare(`${b.received_at ?? ""}:${b.message_id}`));
+  register.sort((a, b) => {
+    // Preserve undated-first policy, but order dated rows by the validated
+    // instant rather than the spelling of its offset or fractional seconds.
+    if (a.received_at === null || b.received_at === null) {
+      if (a.received_at !== b.received_at) return a.received_at === null ? -1 : 1;
+    } else {
+      const left = timestampNanos(a.received_at), right = timestampNanos(b.received_at);
+      if (left !== right) return left < right ? -1 : 1;
+    }
+    return a.message_id === b.message_id ? 0 : a.message_id < b.message_id ? -1 : 1;
+  });
 
   const estimated = register.filter(
     (change) => IMPACT_KINDS.has(change.kind) && change.estimated_hours !== null,

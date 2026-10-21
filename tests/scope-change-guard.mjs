@@ -506,6 +506,40 @@ test("actual offline CLI rejects bad dates, false amount matches and shared over
   }
 });
 
+test("change register sorts actual instants across offsets rather than timestamp spelling", async () => {
+  const input = await fixture();
+  const message = input.later_messages[0];
+  input.later_messages = [
+    { ...message, id: "a-later", received_at: "2026-08-05T08:00:00Z" },
+    { ...message, id: "z-earlier", received_at: "2026-08-05T09:00:00+02:00" },
+  ];
+  assert.deepEqual(analyzeScopeChanges(input).change_register.map(row => row.message_id), ["z-earlier", "a-later"]);
+});
+
+test("change register keeps sub-millisecond order and deterministic IDs for equal instants", async () => {
+  const input = await fixture();
+  const message = input.later_messages[0];
+  input.later_messages = [
+    { ...message, id: "a-later", received_at: "2026-08-05T07:00:00.00000001Z" },
+    { ...message, id: "z-earlier", received_at: "2026-08-05T09:00:00.000000009+02:00" },
+    { ...message, id: "B-same", received_at: "2026-08-05T09:00:00.00000001+02:00" },
+    { ...message, id: "A-same", received_at: "2026-08-05T07:00:00.000000010Z" },
+  ];
+  assert.deepEqual(analyzeScopeChanges(input).change_register.map(row => row.message_id), ["z-earlier", "A-same", "B-same", "a-later"]);
+});
+
+test("undated change rows retain null-first policy with deterministic ID ties", async () => {
+  const input = await fixture();
+  delete input.baseline.approved_at;
+  const message = input.later_messages[0];
+  input.later_messages = [
+    { ...message, id: "dated", received_at: "2026-08-05T07:00:00Z" },
+    { ...message, id: "z-undated", received_at: null },
+    { ...message, id: "a-undated", received_at: undefined },
+  ];
+  assert.deepEqual(analyzeScopeChanges(input).change_register.map(row => row.message_id), ["a-undated", "z-undated", "dated"]);
+});
+
 let passed = 0;
 for (const { name, fn } of tests) {
   try {
